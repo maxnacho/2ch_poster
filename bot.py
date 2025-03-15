@@ -1,82 +1,98 @@
 import os
+import time
 import requests
-import asyncio
-import json
-import random
-import re
-from io import BytesIO
-from telegram import Bot
+import logging
+from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
-from html import unescape
+from PIL import Image
+from io import BytesIO
 
-# Настройки из переменных окружения
+# Настройки
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
-THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
-
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-    raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
+THREAD_URL = os.getenv("THREAD_URL")
+SENT_POSTS_FILE = "sent_posts.txt"
+MAX_MESSAGE_LENGTH = 4096
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
+logging.basicConfig(level=logging.INFO)
 
-CHECK_INTERVAL = 60  # Интервал проверки в секундах
-SENT_POSTS_FILE = "sent_posts.json"
-
-# Загружаем отправленные посты
-try:
+def load_sent_posts():
+    if not os.path.exists(SENT_POSTS_FILE):
+        return set()
     with open(SENT_POSTS_FILE, "r") as f:
-        sent_posts = set(json.load(f))
-except (FileNotFoundError, json.JSONDecodeError):
-    sent_posts = set()
+        return set(f.read().splitlines())
 
-def save_sent_posts():
-    with open(SENT_POSTS_FILE, "w") as f:
-        json.dump(list(sent_posts), f)
+def save_sent_post(post_id):
+    with open(SENT_POSTS_FILE, "a") as f:
+        f.write(post_id + "\n")
 
-# Функция очистки HTML-тегов
-def clean_html(text):
-    text = unescape(text)
-    text = re.sub(r"<a .*?>(.*?)</a>", r"\1", text)
-    text = re.sub(r"<br\s*/?>", "\n", text)
-    text = re.sub(r"<.*?>", "", text)
-    return text.strip()
+def fetch_posts():
+    response = requests.get(THREAD_URL)
+    response.raise_for_status()
+    return response.json().get("posts", [])
 
-# Получение новых постов
-def get_new_posts():
+def split_text(text, max_length=MAX_MESSAGE_LENGTH):
+    """Разбивает длинный текст на части, не превышающие max_length."""
+    parts = []
+    while len(text) > max_length:
+        split_index = text.rfind(" ", 0, max_length)
+        if split_index == -1:
+            split_index = max_length
+        parts.append(text[:split_index])
+        text = text[split_index:].strip()
+    parts.append(text)
+    return parts
+
+def download_and_resize_image(url, max_size=(1280, 1280)):
+    response = requests.get(url)
+    response.raise_for_status()
+    img = Image.open(BytesIO(response.content))
+    img.thumbnail(max_size)
+    img_byte_array = BytesIO()
+    img.save(img_byte_array, format=img.format)
+    return img_byte_array.getvalue()
+
+def send_post(post):
+    post_id = str(post["id"])
+    text = f"#{post_id}\n{post['content']}"
+    media = []
+    
+    # Обработка изображений и видео
+    for attachment in post.get("attachments", []):
+        url = attachment.get("url")
+        if attachment.get("type") == "image":
+            media.append(InputMediaPhoto(download_and_resize_image(url)))
+        elif attachment.get("type") == "video":
+            media.append(InputMediaVideo(url))
+    
     try:
-        response = requests.get(THREAD_URL, timeout=10)
-        data = response.json()
-        posts = data["threads"][0]["posts"]
-        return [p for p in posts if str(p["num"]) not in sent_posts]
-    except Exception as e:
-        print(f"Ошибка при парсинге: {e}")
-        return []
-
-# Функция для публикации в Telegram
-async def post_to_telegram():
-    global sent_posts
-    while True:
-        new_posts = get_new_posts()
-        if not new_posts:
-            print("Новых постов нет. Ждем...")
-        else:
-            for post in new_posts:
-                post_id = str(post["num"])
-                text = clean_html(post.get("comment", ""))
-                message = f"#{post_id}\n\n{text}"
-
-                try:
-                    await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode="HTML")
-                    await asyncio.sleep(1.5)
-                    
-                    sent_posts.add(post_id)
-                    save_sent_posts()
-                except (RetryAfter, TimedOut, BadRequest) as e:
-                    print(f"Ошибка Telegram: {e}")
-                    await asyncio.sleep(5)
-                    continue
+        # Отправка текста
+        text_parts = split_text(text)
+        sent_message = None
+        for part in text_parts:
+            sent_message = bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=part, reply_to_message_id=sent_message.message_id if sent_message else None)
+            time.sleep(1)  # Небольшая задержка между сообщениями
         
-        await asyncio.sleep(CHECK_INTERVAL + random.uniform(1, 5))
+        # Отправка медиа
+        if media:
+            bot.send_media_group(chat_id=TELEGRAM_CHANNEL_ID, media=media, reply_to_message_id=sent_message.message_id if sent_message else None)
+        
+        save_sent_post(post_id)
+    except (RetryAfter, TimedOut) as e:
+        logging.warning(f"Ошибка: {e}. Повторная попытка через 10 секунд...")
+        time.sleep(10)
+        send_post(post)  # Повторная попытка
+    except BadRequest as e:
+        logging.error(f"Ошибка при отправке сообщения: {e}")
+
+def main():
+    sent_posts = load_sent_posts()
+    posts = fetch_posts()
+    for post in posts:
+        if str(post["id"]) not in sent_posts:
+            send_post(post)
+            time.sleep(2)  # Задержка между отправками
 
 if __name__ == "__main__":
-    asyncio.run(post_to_telegram())
+    main()
