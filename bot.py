@@ -14,16 +14,18 @@ from PIL import Image
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
+SENT_POSTS_FILE = os.getenv("SENT_POSTS_FILE", "/data/sent_posts.json")
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
 CHECK_INTERVAL = 60  # Интервал проверки в секундах
-SENT_POSTS_FILE = "sent_posts.json"
 MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
+
+# Проверяем, существует ли папка для хранения файла
+os.makedirs(os.path.dirname(SENT_POSTS_FILE), exist_ok=True)
 
 # Загружаем отправленные посты
 try:
@@ -32,9 +34,13 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     sent_posts = set()
 
+# Функция для сохранения отправленных постов с обработкой ошибок
 def save_sent_posts():
-    with open(SENT_POSTS_FILE, "w") as f:
-        json.dump(list(sent_posts), f)
+    try:
+        with open(SENT_POSTS_FILE, "w") as f:
+            json.dump(list(sent_posts), f)
+    except Exception as e:
+        print(f"Ошибка при сохранении {SENT_POSTS_FILE}: {e}")
 
 # Функция очистки HTML-тегов
 def clean_html(text):
@@ -52,7 +58,6 @@ def split_text(text, max_length=MAX_MESSAGE_LENGTH):
 def validate_and_resize_image(image_data):
     try:
         img = Image.open(BytesIO(image_data))
-
         if img.mode in ("P", "RGBA", "LA"):
             img = img.convert("RGB")
 
