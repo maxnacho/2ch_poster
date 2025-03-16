@@ -101,7 +101,7 @@ async def post_to_telegram():
                 # Добавляем заголовок
                 header = f"#{post_id}"
                 parent_id = post.get("parent")
-                if parent_id and parent_id != "229275":
+                if parent_id and parent_id != "229275":  # Исключаем корневой пост
                     header += f"\nОтвет на #{parent_id}"
                 
                 text = f"{header}\n\n{text}"
