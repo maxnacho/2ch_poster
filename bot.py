@@ -34,7 +34,7 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     sent_posts = set()
 
-# Функция для сохранения отправленных постов с обработкой ошибок
+# Функция для сохранения отправленных постов
 def save_sent_posts():
     try:
         with open(SENT_POSTS_FILE, "w") as f:
@@ -98,29 +98,39 @@ async def post_to_telegram():
                 files = post.get("files", []) or []
                 media_group = []
 
-                # Добавляем заголовок
+                # Добавляем номер поста без "Ответ на #229275"
                 header = f"#{post_id}"
-                parent_id = post.get("parent")
-                if parent_id and parent_id != "229275":  # Исключаем корневой пост
-                    header += f"\nОтвет на #{parent_id}"
+                text = f"{header}\n\n{text}" if text else header
+
+                # Ссылки на файлы, кроме изображений
+                file_links = [
+                    f"{file['name']}: https://2ch.hk{file['path']}"
+                    for file in files
+                    if not file["path"].endswith((".jpg", ".jpeg", ".png", ".gif", ".webm", ".mp4"))
+                ]
                 
-                text = f"{header}\n\n{text}"
+                if file_links:
+                    text += "\n\n" + "\n".join(file_links)
+
                 messages = split_text(text)
 
                 try:
                     # Обрабатываем медиафайлы
                     for file in files:
                         file_url = f"https://2ch.hk{file['path']}"
-                        response = requests.get(file_url, timeout=10)
-                        if response.status_code == 200:
-                            if file["path"].endswith((".jpg", ".jpeg", ".png", ".gif")):
+                        if file["path"].endswith((".jpg", ".jpeg", ".png", ".gif")):
+                            response = requests.get(file_url, timeout=10)
+                            if response.status_code == 200:
                                 image_data = validate_and_resize_image(response.content)
                                 if image_data:
                                     media_group.append(InputMediaPhoto(media=image_data))
-                            elif file["path"].endswith((".webm", ".mp4")):
+                        elif file["path"].endswith((".webm", ".mp4")):
+                            response = requests.get(file_url, timeout=10)
+                            if response.status_code == 200:
                                 video_data = BytesIO(response.content)
                                 media_group.append(InputMediaVideo(media=video_data))
                     
+                    # Отправка медиафайлов
                     if media_group:
                         for i in range(0, len(media_group), 10):
                             chunk = media_group[i:i+10]
@@ -129,6 +139,7 @@ async def post_to_telegram():
                             await bot.send_media_group(chat_id=TELEGRAM_CHANNEL_ID, media=chunk)
                             await asyncio.sleep(1.5)
 
+                    # Отправка текста
                     for i, message in enumerate(messages):
                         if i == 0 and media_group:
                             continue  # Первая часть уже отправлена с медиа
