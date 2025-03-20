@@ -7,7 +7,6 @@ import requests
 import asyncio
 import random
 import re
-import json
 from io import BytesIO
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
@@ -41,35 +40,16 @@ def log_listener():
 listener_thread = threading.Thread(target=log_listener, daemon=True)
 listener_thread.start()
 
-# Файл для хранения последнего ID
-LAST_POST_FILE = "last_post_id.json"
-
 # Настройки из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
+LAST_POST_ID = int(os.getenv("LAST_POST_ID", 0))  # Начальное значение из переменной окружения
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID!")
 
-# Загрузка последнего ID из файла
-def load_last_post_id():
-    try:
-        with open(LAST_POST_FILE, "r") as f:
-            data = json.load(f)
-            return int(data.get("last_post_id", 0))
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
-        return 0
-
-# Сохранение последнего ID в файл
-def save_last_post_id(post_id):
-    with open(LAST_POST_FILE, "w") as f:
-        json.dump({"last_post_id": post_id}, f)
-    logger.info(f"Обновлён LAST_POST_ID: {post_id}")
-
-LAST_POST_ID = load_last_post_id()
-
-# Инициализация бота один раз
+# Инициализация бота
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 logger.info("Бот инициализирован")
 
@@ -103,14 +83,13 @@ def validate_and_resize_image(image_data):
         logger.error(f"Ошибка обработки изображения: {e}")
         return None
 
-async def get_new_posts():
-    global LAST_POST_ID
+async def get_new_posts(last_post_id):
     try:
         response = requests.get(THREAD_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
         posts = data["threads"][0]["posts"]
-        new_posts = [p for p in posts if int(p["num"]) > LAST_POST_ID]
+        new_posts = [p for p in posts if int(p["num"]) > last_post_id]
         return new_posts
     except Exception as e:
         logger.error(f"Ошибка при парсинге: {e}")
@@ -118,14 +97,18 @@ async def get_new_posts():
 
 async def post_to_telegram():
     global LAST_POST_ID
+    processed_posts = set()  # Для предотвращения повторной отправки в рамках одного запуска
     while True:
         try:
-            new_posts = await get_new_posts()
+            new_posts = await get_new_posts(LAST_POST_ID)
             if not new_posts:
                 logger.info("Новых постов нет. Ждем...")
             else:
                 for post in new_posts:
                     post_id = int(post["num"])
+                    if post_id in processed_posts:
+                        continue  # Пропускаем уже обработанные посты
+
                     text = clean_html(post.get("comment", ""))
                     files = post.get("files", []) or []
                     media_group = []
@@ -180,7 +163,8 @@ async def post_to_telegram():
                         await asyncio.sleep(1.5)
 
                     LAST_POST_ID = post_id
-                    save_last_post_id(post_id)
+                    processed_posts.add(post_id)
+                    logger.info(f"Обновлён LAST_POST_ID: {LAST_POST_ID}")
         except Exception as e:
             logger.error(f"Ошибка в цикле обработки: {e}")
             await asyncio.sleep(5)
@@ -192,26 +176,10 @@ async def main():
     await post_to_telegram()
 
 if __name__ == "__main__":
-    # Защита от многократного запуска
-    pid_file = "bot.pid"
-    if os.path.exists(pid_file):
-        with open(pid_file, "r") as f:
-            pid = int(f.read().strip())
-        try:
-            os.kill(pid, 0)
-            logger.error("Бот уже запущен с PID %d. Завершаем.", pid)
-            exit(1)
-        except OSError:
-            pass  # Процесс не существует, можно запускать
-
-    with open(pid_file, "w") as f:
-        f.write(str(os.getpid()))
-
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
     finally:
-        os.remove(pid_file)
         log_queue.put(None)
         listener_thread.join()
