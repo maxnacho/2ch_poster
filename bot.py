@@ -27,7 +27,7 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not SUPABASE_URL or not 
     raise ValueError("Отсутствуют необходимые переменные окружения!")
 
 headers = {
-    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "apikey": SUPABASE_KEY,
     "Content-Type": "application/json",
 }
 
