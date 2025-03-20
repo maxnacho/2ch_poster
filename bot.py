@@ -33,40 +33,48 @@ headers = {
 }
 base_url = f"{SUPABASE_URL}/rest/v1"
 
-# Функция для проверки, отправлен ли пост
-def is_post_sent(post_id):
-    url = f"{base_url}/sent_posts?select=post_id&post_id=eq.{post_id}"
+# Функция для проверки, отправлены ли посты (пакетный запрос)
+def are_posts_sent(post_ids):
+    if not post_ids:
+        return set()
+    # Используем фильтр in для пакетного запроса
+    post_ids_str = ",".join(map(str, post_ids))
+    url = f"{base_url}/sent_posts?select=post_id&post_id=in.({post_ids_str})"
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
-        return len(data) > 0
+        # Возвращаем множество ID постов, которые уже отправлены
+        return {item["post_id"] for item in data}
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка проверки поста {post_id}: {e}")
-        return False  # Если ошибка, считаем, что пост не отправлен
+        logger.error(f"Ошибка проверки постов: {e}")
+        return set()
 
-# Функция для добавления отправленного поста в базу данных
-def add_sent_post(post_id):
+# Функция для добавления отправленных постов в базу данных (пакетная вставка)
+def add_sent_posts(post_ids):
+    if not post_ids:
+        return True
     url = f"{base_url}/sent_posts"
-    data = {"post_id": post_id}
+    # Формируем список записей для вставки
+    data = [{"post_id": post_id} for post_id in post_ids]
     try:
         response = requests.post(url, headers=headers, json=data)
         if response.status_code == 201:
-            logger.info(f"Post {post_id} successfully added to database")
+            logger.info(f"Posts {post_ids} successfully added to database")
             return True
         elif response.status_code == 400:
             error_data = response.json()
             if "message" in error_data and "unique constraint" in error_data["message"].lower():
-                logger.info(f"Post {post_id} already exists in database")
+                logger.info(f"Some posts in {post_ids} already exist in database")
                 return False
             else:
-                logger.error(f"Ошибка добавления поста {post_id}: {response.text}")
+                logger.error(f"Ошибка добавления постов {post_ids}: {response.text}")
                 return False
         else:
-            logger.error(f"Ошибка добавления поста {post_id}: {response.status_code} {response.text}")
+            logger.error(f"Ошибка добавления постов {post_ids}: {response.status_code} {response.text}")
             return False
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка запроса при добавлении поста {post_id}: {e}")
+        logger.error(f"Ошибка запроса при добавлении постов {post_ids}: {e}")
         return False
 
 # Очистка HTML
@@ -191,25 +199,36 @@ async def bot_task():
         logger.info("Checking for new posts")
         all_posts = get_all_posts()
         logger.info(f"Found {len(all_posts)} posts")
-        for post in all_posts:
-            post_id = str(post["num"])
-            if is_post_sent(post_id):
-                logger.info(f"Post {post_id} already sent, skipping")
-                continue
 
-            # Сначала пытаемся записать в базу
-            if add_sent_post(post_id):
-                logger.info(f"Sending post {post_id} to Telegram")
-                success = await send_post_to_telegram(bot, TELEGRAM_CHANNEL_ID, post)
-                if not success:
-                    logger.warning(f"Failed to send post {post_id} to Telegram")
+        # Извлекаем все ID постов
+        post_ids = [str(post["num"]) for post in all_posts]
+
+        # Пакетно проверяем, какие посты уже отправлены
+        sent_post_ids = are_posts_sent(post_ids)
+
+        # Собираем новые посты для отправки
+        new_posts = [post for post in all_posts if str(post["num"]) not in sent_post_ids]
+        new_post_ids = [str(post["num"]) for post in new_posts]
+
+        if not new_posts:
+            logger.info("No new posts to send")
+        else:
+            # Пакетно добавляем новые посты в базу
+            if add_sent_posts(new_post_ids):
+                for post in new_posts:
+                    post_id = str(post["num"])
+                    logger.info(f"Sending post {post_id} to Telegram")
+                    success = await send_post_to_telegram(bot, TELEGRAM_CHANNEL_ID, post)
+                    if not success:
+                        logger.warning(f"Failed to send post {post_id} to Telegram")
             else:
-                logger.warning(f"Failed to add post {post_id} to database, skipping Telegram send")
+                logger.warning(f"Failed to add new posts to database, skipping Telegram send")
 
-        await asyncio.sleep(60 + random.uniform(1, 5))
+        await asyncio.sleep(300)  # Интервал 5 минут
 
 # HTTP-сервер для проверки состояния
 async def health(request):
+    logger.info("Health check requested")
     return web.Response(text="OK")
 
 # Основная функция
@@ -219,7 +238,7 @@ async def main():
     app.add_routes([web.get('/health', health)])
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv('PORT', 10000))  # Изменено на 10000, так как Render обнаружил этот порт
+    port = int(os.getenv('PORT', 10000))  # Порт 10000, как указано в Render
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
