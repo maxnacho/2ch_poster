@@ -2,6 +2,8 @@ import os
 import requests
 import asyncio
 import logging
+import random
+import re
 from io import BytesIO
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
@@ -12,7 +14,7 @@ from PIL import Image
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
-LAST_POST_ID = int(os.getenv("LAST_POST_ID", 1247714))  # Загружаем последний отправленный пост
+LAST_POST_ID = int(os.getenv("LAST_POST_ID"))  # Загружаем последний отправленный пост
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
@@ -22,7 +24,7 @@ CHECK_INTERVAL = 60  # Интервал проверки в секундах
 MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
 
-# Настройка логирования
+# Настроим логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -154,7 +156,8 @@ async def post_to_telegram():
         
         await asyncio.sleep(CHECK_INTERVAL + random.uniform(1, 5))
 
-# Запуск бота как асинхронной задачи
+# Запуск бота без Flask
 if __name__ == "__main__":
     logger.info("Запуск бота...")
-    asyncio.run(post_to_telegram())  # Просто запускаем основной цикл
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(post_to_telegram())
