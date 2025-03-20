@@ -164,4 +164,5 @@ async def post_to_telegram():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(post_to_telegram())
+    threading.Thread(target=start_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
