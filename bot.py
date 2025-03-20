@@ -26,16 +26,16 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Отсутствуют необходимые переменные окружения!")
 
+# Настройка заголовков для REST API
 headers = {
     "apikey": SUPABASE_KEY,
     "Content-Type": "application/json",
 }
-
 base_url = f"{SUPABASE_URL}/rest/v1"
 
 # Функция для проверки, отправлен ли пост
 def is_post_sent(post_id):
-    url = f"{base_url}/sent_posts?select=id&id=eq.{post_id}"
+    url = f"{base_url}/sent_posts?select=post_id&post_id=eq.{post_id}"
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -45,25 +45,29 @@ def is_post_sent(post_id):
         logger.error(f"Ошибка проверки поста {post_id}: {e}")
         return False  # Если ошибка, считаем, что пост не отправлен
 
-# Функция для добавления отправленного поста
+# Функция для добавления отправленного поста в базу данных
 def add_sent_post(post_id):
     url = f"{base_url}/sent_posts"
-    data = {"id": post_id}
+    data = {"post_id": post_id}
     try:
         response = requests.post(url, headers=headers, json=data)
         if response.status_code == 201:
-            pass  # Успешно добавлено
+            logger.info(f"Post {post_id} successfully added to database")
+            return True
         elif response.status_code == 400:
-            # Проверка на уникальное ограничение
             error_data = response.json()
             if "message" in error_data and "unique constraint" in error_data["message"].lower():
-                pass  # Уже существует, ничего не делать
+                logger.info(f"Post {post_id} already exists in database")
+                return False
             else:
                 logger.error(f"Ошибка добавления поста {post_id}: {response.text}")
+                return False
         else:
             logger.error(f"Ошибка добавления поста {post_id}: {response.status_code} {response.text}")
+            return False
     except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка запроса при добавлении поста {post_id}: {e}")
+        return False
 
 # Очистка HTML
 def clean_html(text):
@@ -154,9 +158,16 @@ async def send_post_to_telegram(bot, chat_id, post):
 
         logger.info(f"Post {post_id} sent successfully")
         return True
-    except (RetryAfter, TimedOut, BadRequest) as e:
+    except RetryAfter as e:
         logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(30)  # Увеличенная задержка при превышении лимита
+        return False
+    except TimedOut as e:
+        logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
+        await asyncio.sleep(10)  # Задержка при таймауте
+        return False
+    except BadRequest as e:
+        logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
         return False
 
 # Основной цикл бота
@@ -170,16 +181,18 @@ async def bot_task():
         logger.info(f"Found {len(all_posts)} posts")
         for post in all_posts:
             post_id = str(post["num"])
-            if not is_post_sent(post_id):
-                logger.info(f"Sending post {post_id}")
-                success = await send_post_to_telegram(bot, TELEGRAM_CHANNEL_ID, post)
-                if success:
-                    add_sent_post(post_id)
-                    logger.info(f"Post {post_id} sent and recorded")
-                else:
-                    logger.warning(f"Failed to send post {post_id}")
-            else:
+            if is_post_sent(post_id):
                 logger.info(f"Post {post_id} already sent, skipping")
+                continue
+
+            # Сначала пытаемся записать в базу
+            if add_sent_post(post_id):
+                logger.info(f"Sending post {post_id} to Telegram")
+                success = await send_post_to_telegram(bot, TELEGRAM_CHANNEL_ID, post)
+                if not success:
+                    logger.warning(f"Failed to send post {post_id} to Telegram")
+            else:
+                logger.warning(f"Failed to add post {post_id} to database, skipping Telegram send")
 
         await asyncio.sleep(60 + random.uniform(1, 5))
 
