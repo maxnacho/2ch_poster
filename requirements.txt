@@ -1,4 +1,4 @@
-python-telegram-bot
 requests
-pillow
-flask
+python-telegram-bot
+Pillow
+aiohttp
