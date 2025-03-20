@@ -35,7 +35,7 @@ base_url = f"{SUPABASE_URL}/rest/v1"
 
 # Функция для проверки, отправлен ли пост
 def is_post_sent(post_id):
-    url = f"{base_url}/sent_posts?select=id&id=eq.{post_id}"
+    url = f"{base_url}/sent_posts?select=post_id&post_id=eq.{post_id}"
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -48,7 +48,7 @@ def is_post_sent(post_id):
 # Функция для добавления отправленного поста в базу данных
 def add_sent_post(post_id):
     url = f"{base_url}/sent_posts"
-    data = {"id": post_id}
+    data = {"post_id": post_id}
     try:
         response = requests.post(url, headers=headers, json=data)
         if response.status_code == 201:
@@ -108,8 +108,8 @@ def get_all_posts():
         logger.error(f"Ошибка при парсинге: {e}")
         return []
 
-# Отправка поста в Telegram
-async def send_post_to_telegram(bot, chat_id, post):
+# Отправка поста в Telegram с повторными попытками
+async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
     post_id = str(post["num"])
     text = clean_html(post.get("comment", ""))
     files = post.get("files", []) or []
@@ -129,46 +129,58 @@ async def send_post_to_telegram(bot, chat_id, post):
 
     messages = split_text(text)
 
-    try:
-        for file in files:
-            file_url = f"https://2ch.hk{file['path']}"
-            response = requests.get(file_url, timeout=10)
-            if response.status_code == 200:
-                if file["path"].endswith((".jpg", ".jpeg", ".png", ".gif")):
-                    image_data = validate_and_resize_image(response.content)
-                    if image_data:
-                        media_group.append(InputMediaPhoto(media=image_data))
-                elif file["path"].endswith((".webm", ".mp4")):
-                    video_data = BytesIO(response.content)
-                    media_group.append(InputMediaVideo(media=video_data))
+    for attempt in range(max_retries):
+        try:
+            for file in files:
+                file_url = f"https://2ch.hk{file['path']}"
+                response = requests.get(file_url, timeout=10)
+                if response.status_code == 200:
+                    if file["path"].endswith((".jpg", ".jpeg", ".png", ".gif")):
+                        image_data = validate_and_resize_image(response.content)
+                        if image_data:
+                            media_group.append(InputMediaPhoto(media=image_data))
+                    elif file["path"].endswith((".webm", ".mp4")):
+                        video_data = BytesIO(response.content)
+                        media_group.append(InputMediaVideo(media=video_data))
 
-        if media_group:
-            for i in range(0, len(media_group), 10):
-                chunk = media_group[i:i+10]
-                if i == 0 and messages:
-                    chunk[0] = InputMediaPhoto(media=chunk[0].media, caption=messages[0], parse_mode="HTML")
-                await bot.send_media_group(chat_id=chat_id, media=chunk)
-                await asyncio.sleep(1)
+            if media_group:
+                for i in range(0, len(media_group), 10):
+                    chunk = media_group[i:i+10]
+                    if i == 0 and messages:
+                        chunk[0] = InputMediaPhoto(media=chunk[0].media, caption=messages[0], parse_mode="HTML")
+                    await bot.send_media_group(chat_id=chat_id, media=chunk)
+                    await asyncio.sleep(3)  # Задержка между отправками медиа
 
-        for i, message in enumerate(messages):
-            if i == 0 and media_group:
-                continue
-            await bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
-            await asyncio.sleep(1)
+            for i, message in enumerate(messages):
+                if i == 0 and media_group:
+                    continue
+                await bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
+                await asyncio.sleep(3)  # Задержка между отправками сообщений
 
-        logger.info(f"Post {post_id} sent successfully")
-        return True
-    except RetryAfter as e:
-        logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
-        await asyncio.sleep(30)  # Увеличенная задержка при превышении лимита
-        return False
-    except TimedOut as e:
-        logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
-        await asyncio.sleep(10)  # Задержка при таймауте
-        return False
-    except BadRequest as e:
-        logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
-        return False
+            logger.info(f"Post {post_id} sent successfully")
+            return True
+
+        except RetryAfter as e:
+            logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
+            await asyncio.sleep(e.retry_after + 5)  # Ждём указанное время + 5 секунд
+            if attempt == max_retries - 1:
+                logger.warning(f"Failed to send post {post_id} after {max_retries} attempts")
+                return False
+            continue
+
+        except TimedOut as e:
+            logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
+            await asyncio.sleep(10)  # Задержка при таймауте
+            if attempt == max_retries - 1:
+                logger.warning(f"Failed to send post {post_id} after {max_retries} attempts")
+                return False
+            continue
+
+        except BadRequest as e:
+            logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
+            return False
+
+    return False
 
 # Основной цикл бота
 async def bot_task():
@@ -207,7 +219,7 @@ async def main():
     app.add_routes([web.get('/health', health)])
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv('PORT', 8080))
+    port = int(os.getenv('PORT', 10000))  # Изменено на 10000, так как Render обнаружил этот порт
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
