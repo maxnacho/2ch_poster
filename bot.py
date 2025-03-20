@@ -161,9 +161,12 @@ async def post_to_telegram():
         
         await asyncio.sleep(CHECK_INTERVAL + random.uniform(1, 5))
 
-# Запускаем бота и Flask
+# Запуск бота в отдельном потоке
+def start_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(post_to_telegram())
+
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(post_to_telegram())
     threading.Thread(target=start_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
