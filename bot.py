@@ -7,6 +7,7 @@ import requests
 import asyncio
 import random
 import re
+import json
 from io import BytesIO
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
@@ -15,12 +16,10 @@ from PIL import Image
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.INFO,  # Повышаем уровень до INFO
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()]
 )
-
-# Понижаем уровень логов для telegram.Bot
 logging.getLogger("telegram.Bot").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
@@ -42,14 +41,33 @@ def log_listener():
 listener_thread = threading.Thread(target=log_listener, daemon=True)
 listener_thread.start()
 
+# Файл для хранения последнего ID
+LAST_POST_FILE = "last_post_id.json"
+
 # Настройки из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
-LAST_POST_ID = int(os.getenv("LAST_POST_ID"))
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID!")
+
+# Загрузка последнего ID из файла
+def load_last_post_id():
+    try:
+        with open(LAST_POST_FILE, "r") as f:
+            data = json.load(f)
+            return int(data.get("last_post_id", 0))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return 0
+
+# Сохранение последнего ID в файл
+def save_last_post_id(post_id):
+    with open(LAST_POST_FILE, "w") as f:
+        json.dump({"last_post_id": post_id}, f)
+    logger.info(f"Обновлён LAST_POST_ID: {post_id}")
+
+LAST_POST_ID = load_last_post_id()
 
 # Инициализация бота один раз
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -86,6 +104,7 @@ def validate_and_resize_image(image_data):
         return None
 
 async def get_new_posts():
+    global LAST_POST_ID
     try:
         response = requests.get(THREAD_URL, timeout=10)
         response.raise_for_status()
@@ -96,12 +115,6 @@ async def get_new_posts():
     except Exception as e:
         logger.error(f"Ошибка при парсинге: {e}")
         return []
-
-def update_last_post_id(post_id):
-    global LAST_POST_ID
-    LAST_POST_ID = post_id
-    os.environ["LAST_POST_ID"] = str(post_id)
-    logger.info(f"Обновлён LAST_POST_ID: {post_id}")
 
 async def post_to_telegram():
     global LAST_POST_ID
@@ -166,7 +179,8 @@ async def post_to_telegram():
                         await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode="HTML")
                         await asyncio.sleep(1.5)
 
-                    update_last_post_id(post_id)
+                    LAST_POST_ID = post_id
+                    save_last_post_id(post_id)
         except Exception as e:
             logger.error(f"Ошибка в цикле обработки: {e}")
             await asyncio.sleep(5)
@@ -178,10 +192,26 @@ async def main():
     await post_to_telegram()
 
 if __name__ == "__main__":
+    # Защита от многократного запуска
+    pid_file = "bot.pid"
+    if os.path.exists(pid_file):
+        with open(pid_file, "r") as f:
+            pid = int(f.read().strip())
+        try:
+            os.kill(pid, 0)
+            logger.error("Бот уже запущен с PID %d. Завершаем.", pid)
+            exit(1)
+        except OSError:
+            pass  # Процесс не существует, можно запускать
+
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
     finally:
-        log_queue.put(None)  # Останавливаем слушатель логов
+        os.remove(pid_file)
+        log_queue.put(None)
         listener_thread.join()
