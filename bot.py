@@ -1,12 +1,8 @@
 import os
 import requests
 import asyncio
-import threading
-import json
-import random
-import re
+import logging
 from io import BytesIO
-from flask import Flask
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
 from html import unescape
@@ -26,12 +22,9 @@ CHECK_INTERVAL = 60  # Интервал проверки в секундах
 MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
 
-# Flask-сервер для поддержки Render
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running!"
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Функция очистки HTML-тегов
 def clean_html(text):
@@ -61,7 +54,7 @@ def validate_and_resize_image(image_data):
         output.seek(0)
         return output
     except Exception as e:
-        print(f"Ошибка обработки изображения: {e}")
+        logger.error(f"Ошибка обработки изображения: {e}")
         return None
 
 # Функция получения новых постов
@@ -72,7 +65,7 @@ def get_new_posts():
         posts = data["threads"][0]["posts"]
         return [p for p in posts if int(p["num"]) > LAST_POST_ID]
     except Exception as e:
-        print(f"Ошибка при парсинге: {e}")
+        logger.error(f"Ошибка при парсинге: {e}")
         return []
 
 # Функция обновления переменной окружения
@@ -80,7 +73,7 @@ def update_last_post_id(post_id):
     global LAST_POST_ID
     LAST_POST_ID = post_id
     os.environ["LAST_POST_ID"] = str(post_id)
-    print(f"Обновлён LAST_POST_ID: {post_id}")
+    logger.info(f"Обновлён LAST_POST_ID: {post_id}")
 
 # Функция для публикации в Telegram
 async def post_to_telegram():
@@ -88,7 +81,7 @@ async def post_to_telegram():
     while True:
         new_posts = get_new_posts()
         if not new_posts:
-            print("Новых постов нет. Ждем...")
+            logger.info("Новых постов нет. Ждем...")
         else:
             for post in new_posts:
                 post_id = int(post["num"])
@@ -155,18 +148,13 @@ async def post_to_telegram():
                     # Обновляем ID последнего поста
                     update_last_post_id(post_id)
                 except (RetryAfter, TimedOut, BadRequest) as e:
-                    print(f"Ошибка Telegram: {e}")
+                    logger.error(f"Ошибка Telegram: {e}")
                     await asyncio.sleep(5)
                     continue
         
         await asyncio.sleep(CHECK_INTERVAL + random.uniform(1, 5))
 
-# Запуск бота в отдельном потоке
-def start_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(post_to_telegram())
-
+# Запуск бота как асинхронной задачи
 if __name__ == "__main__":
-    threading.Thread(target=start_bot, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    logger.info("Запуск бота...")
+    asyncio.run(post_to_telegram())  # Просто запускаем основной цикл
