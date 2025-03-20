@@ -56,15 +56,9 @@ LAST_POST_ID = int(os.getenv("LAST_POST_ID"))  # Загружаем послед
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
 
-# Флаг для проверки инициализации бота
-bot_initialized = False
-bot = None  # Инициализация переменной для бота
-
-# Проверка, если bot уже инициализирован
-if not bot_initialized:
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    bot_initialized = True
-    logger.info("Бот инициализирован")
+# Инициализация бота
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+logger.info("Бот инициализирован")
 
 CHECK_INTERVAL = 60  # Интервал проверки в секундах
 MAX_CAPTION_LENGTH = 1024
@@ -105,12 +99,13 @@ def validate_and_resize_image(image_data):
         return None
 
 # Функция получения новых постов
-def get_new_posts():
+async def get_new_posts():
     try:
         response = requests.get(THREAD_URL, timeout=10)
         data = response.json()
         posts = data["threads"][0]["posts"]
-        return [p for p in posts if int(p["num"]) > LAST_POST_ID]
+        new_posts = [p for p in posts if int(p["num"]) > LAST_POST_ID]
+        return new_posts
     except Exception as e:
         logger.error(f"Ошибка при парсинге: {e}")
         return []
@@ -126,7 +121,7 @@ def update_last_post_id(post_id):
 async def post_to_telegram():
     global LAST_POST_ID
     while True:
-        new_posts = get_new_posts()
+        new_posts = await get_new_posts()  # Используем асинхронный вызов
         if not new_posts:
             logger.info("Новых постов нет. Ждем...")
         else:
@@ -203,7 +198,7 @@ async def post_to_telegram():
 
 # Запуск бота
 def start_bot():
-    if bot_initialized:
+    if bot:
         logger.info("Бот уже запущен. Пропускаем запуск.")
         return
     logger.info("Запуск бота...")
