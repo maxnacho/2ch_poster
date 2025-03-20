@@ -56,11 +56,15 @@ LAST_POST_ID = int(os.getenv("LAST_POST_ID"))  # Загружаем послед
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
 
-# Проверка, если bot уже инициализирован
+# Флаг для проверки инициализации бота
 bot_initialized = False
+bot = None  # Инициализация переменной для бота
+
+# Проверка, если bot уже инициализирован
 if not bot_initialized:
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     bot_initialized = True
+    logger.info("Бот инициализирован")
 
 CHECK_INTERVAL = 60  # Интервал проверки в секундах
 MAX_CAPTION_LENGTH = 1024
@@ -199,6 +203,9 @@ async def post_to_telegram():
 
 # Запуск бота
 def start_bot():
+    if bot_initialized:
+        logger.info("Бот уже запущен. Пропускаем запуск.")
+        return
     logger.info("Запуск бота...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
