@@ -1,20 +1,58 @@
+import logging
+import logging.handlers
+import threading
+import queue
 import os
 import requests
 import asyncio
 import random
 import re
-import logging
 from io import BytesIO
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
 from html import unescape
 from PIL import Image
 
+# Очередь для логов
+log_queue = queue.Queue()
+
+# Обработчик для записи логов в очередь
+queue_handler = logging.handlers.QueueHandler(log_queue)
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.DEBUG,  # Уровень логирования
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),  # Для вывода в терминал
+        logging.FileHandler("bot_logs.log")  # Для записи в файл
+    ]
+)
+
+logger = logging.getLogger()
+logger.addHandler(queue_handler)
+
+# Обработчик для вывода логов
+def log_listener():
+    while True:
+        try:
+            record = log_queue.get()
+            if record is None:
+                break  # Завершаем слушатель при получении None
+            logger = logging.getLogger(record.name)
+            logger.handle(record)
+        except Exception as e:
+            print(f"Ошибка при обработке лога: {e}")
+
+# Запуск слушателя логов в фоновом потоке
+listener_thread = threading.Thread(target=log_listener)
+listener_thread.start()
+
 # Настройки из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
-LAST_POST_ID = int(os.getenv("LAST_POST_ID", 1247714))  # Загружаем последний отправленный пост из переменной окружения
+LAST_POST_ID = int(os.getenv("LAST_POST_ID", 1247714))  # Загружаем последний отправленный пост
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
@@ -168,3 +206,4 @@ if __name__ == "__main__":
         start_bot()
     except KeyboardInterrupt:
         logger.info("Бот завершил свою работу.")
+        listener_thread.join()  # Завершаем поток слушателя логов
