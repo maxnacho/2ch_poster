@@ -35,7 +35,7 @@ base_url = f"{SUPABASE_URL}/rest/v1"
 
 # Функция для проверки, отправлен ли пост
 def is_post_sent(post_id):
-    url = f"{base_url}/sent_posts?select=post_id&post_id=eq.{post_id}"
+    url = f"{base_url}/sent_posts?select=id&id=eq.{post_id}"
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -48,7 +48,7 @@ def is_post_sent(post_id):
 # Функция для добавления отправленного поста
 def add_sent_post(post_id):
     url = f"{base_url}/sent_posts"
-    data = {"post_id": post_id}
+    data = {"id": post_id}
     try:
         response = requests.post(url, headers=headers, json=data)
         if response.status_code == 201:
