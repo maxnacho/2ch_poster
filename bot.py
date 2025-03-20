@@ -14,7 +14,7 @@ from PIL import Image
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
-LAST_POST_ID = int(os.getenv("LAST_POST_ID", 1247714))  # Загружаем последний отправленный пост
+LAST_POST_ID = int(os.getenv("LAST_POST_ID", 1247714))  # Загружаем последний отправленный пост из переменной окружения
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
     raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
