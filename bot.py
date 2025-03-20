@@ -5,6 +5,7 @@ import json
 import random
 import re
 from io import BytesIO
+from flask import Flask
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
 from html import unescape
@@ -23,6 +24,13 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 CHECK_INTERVAL = 60  # Интервал проверки в секундах
 MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
+
+# Flask-сервер для поддержки Render
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
 
 # Функция очистки HTML-тегов
 def clean_html(text):
@@ -152,5 +160,8 @@ async def post_to_telegram():
         
         await asyncio.sleep(CHECK_INTERVAL + random.uniform(1, 5))
 
+# Запускаем бота и Flask
 if __name__ == "__main__":
-    asyncio.run(post_to_telegram())
+    loop = asyncio.get_event_loop()
+    loop.create_task(post_to_telegram())
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
