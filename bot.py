@@ -13,23 +13,21 @@ from telegram.error import RetryAfter, TimedOut, BadRequest
 from html import unescape
 from PIL import Image
 
-# Очередь для логов
-log_queue = queue.Queue()
-
-# Обработчик для записи логов в очередь
-queue_handler = logging.handlers.QueueHandler(log_queue)
-
 # Настройка логирования
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,  # Повышаем уровень до INFO
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()]
 )
 
-logger = logging.getLogger()
+# Понижаем уровень логов для telegram.Bot
+logging.getLogger("telegram.Bot").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+log_queue = queue.Queue()
+queue_handler = logging.handlers.QueueHandler(log_queue)
 logger.addHandler(queue_handler)
 
-# Обработчик логов в фоновом потоке
 def log_listener():
     while True:
         try:
@@ -41,7 +39,6 @@ def log_listener():
         except Exception as e:
             print(f"Ошибка при обработке лога: {e}")
 
-# Запуск слушателя логов
 listener_thread = threading.Thread(target=log_listener, daemon=True)
 listener_thread.start()
 
@@ -49,20 +46,19 @@ listener_thread.start()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 THREAD_URL = os.getenv("THREAD_URL", "https://2ch.hk/cc/res/229275.json")
-LAST_POST_ID = int(os.getenv("LAST_POST_ID", 0))  # Значение по умолчанию 0, если не задано
+LAST_POST_ID = int(os.getenv("LAST_POST_ID"))
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-    raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID в переменных окружения!")
+    raise ValueError("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID!")
 
-# Инициализация бота
+# Инициализация бота один раз
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 logger.info("Бот инициализирован")
 
-CHECK_INTERVAL = 60  # Интервал проверки в секундах
+CHECK_INTERVAL = 60
 MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
 
-# Функция очистки HTML-тегов
 def clean_html(text):
     text = unescape(text)
     text = re.sub(r"<a .*?>(.*?)</a>", r"\1", text)
@@ -70,21 +66,17 @@ def clean_html(text):
     text = re.sub(r"<.*?>", "", text)
     return text.strip()
 
-# Функция разбиения длинных сообщений
 def split_text(text, max_length=MAX_MESSAGE_LENGTH):
     return [text[i:i+max_length] for i in range(0, len(text), max_length)]
 
-# Обработка изображений
 def validate_and_resize_image(image_data):
     try:
         img = Image.open(BytesIO(image_data))
         if img.mode in ("P", "RGBA", "LA"):
             img = img.convert("RGB")
-
         width, height = img.size
         if width < 320 or height < 320 or width > 10000 or height > 10000:
             img = img.resize((1280, 720))
-
         output = BytesIO()
         img.save(output, format="JPEG")
         output.seek(0)
@@ -93,7 +85,6 @@ def validate_and_resize_image(image_data):
         logger.error(f"Ошибка обработки изображения: {e}")
         return None
 
-# Функция получения новых постов
 async def get_new_posts():
     try:
         response = requests.get(THREAD_URL, timeout=10)
@@ -106,14 +97,12 @@ async def get_new_posts():
         logger.error(f"Ошибка при парсинге: {e}")
         return []
 
-# Функция обновления последнего ID поста
 def update_last_post_id(post_id):
     global LAST_POST_ID
     LAST_POST_ID = post_id
     os.environ["LAST_POST_ID"] = str(post_id)
     logger.info(f"Обновлён LAST_POST_ID: {post_id}")
 
-# Функция для публикации в Telegram
 async def post_to_telegram():
     global LAST_POST_ID
     while True:
@@ -136,13 +125,12 @@ async def post_to_telegram():
                         for file in files
                         if not file["path"].endswith((".jpg", ".jpeg", ".png", ".gif", ".webm", ".mp4"))
                     ]
-                    
                     if file_links:
                         text += "\n\n" + "\n".join(file_links)
 
                     messages = split_text(text)
-
                     video_sent = False
+
                     for file in files:
                         file_url = f"https://2ch.hk{file['path']}"
                         if file["path"].endswith((".jpg", ".jpeg", ".png", ".gif")):
@@ -157,7 +145,7 @@ async def post_to_telegram():
                                 video_data = BytesIO(response.content)
                                 media_group.append(InputMediaVideo(media=video_data))
                                 video_sent = True
-                    
+
                     if not video_sent:
                         for file in files:
                             if file["path"].endswith((".webm", ".mp4")):
@@ -185,19 +173,15 @@ async def post_to_telegram():
         
         await asyncio.sleep(CHECK_INTERVAL + random.uniform(1, 5))
 
-# Запуск бота
-def start_bot():
+async def main():
     logger.info("Запуск бота...")
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    await post_to_telegram()
+
+if __name__ == "__main__":
     try:
-        loop.run_until_complete(post_to_telegram())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
     finally:
-        loop.close()
-
-if __name__ == "__main__":
-    start_bot()
+        log_queue.put(None)  # Останавливаем слушатель логов
+        listener_thread.join()
