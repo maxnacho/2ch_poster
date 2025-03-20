@@ -28,7 +28,13 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not SUPABASE_URL:
 
 # Функция для создания пула соединений с базой данных
 async def create_db_pool():
-    return await asyncpg.create_pool(SUPABASE_URL)
+    try:
+        pool = await asyncpg.create_pool(SUPABASE_URL)
+        logger.info("Database pool created successfully")
+        return pool
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
 
 # Функция для проверки, отправлен ли пост
 async def is_post_sent(pool, post_id):
@@ -84,7 +90,7 @@ def get_all_posts():
 async def send_post_to_telegram(bot, chat_id, post, pool):
     post_id = str(post["num"])
     if await is_post_sent(pool, post_id):
-        logger.warning(f"Post {post_id} is already sent, skipping.")
+        logger.info(f"Post {post_id} is already sent, skipping.")
         return False
 
     text = clean_html(post.get("comment", ""))
@@ -132,25 +138,35 @@ async def send_post_to_telegram(bot, chat_id, post, pool):
             await bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
             await asyncio.sleep(1)
 
+        logger.info(f"Post {post_id} sent successfully")
         return True
     except (RetryAfter, TimedOut, BadRequest) as e:
-        logger.error(f"Ошибка Telegram: {e}")
+        logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
         await asyncio.sleep(5)
         return False
 
 # Основной цикл бота
 async def bot_task():
+    logger.info("Bot task started")
     pool = await create_db_pool()
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
     while True:
+        logger.info("Checking for new posts")
         all_posts = get_all_posts()
+        logger.info(f"Found {len(all_posts)} posts")
         for post in all_posts:
             post_id = str(post["num"])
-            if not await is_post_sent(pool, post_id):
+            if await is_post_sent(pool, post_id):
+                logger.info(f"Post {post_id} already sent, skipping")
+            else:
+                logger.info(f"Sending post {post_id}")
                 success = await send_post_to_telegram(bot, TELEGRAM_CHANNEL_ID, post, pool)
                 if success:
                     await add_sent_post(pool, post_id)
+                    logger.info(f"Post {post_id} sent and recorded")
+                else:
+                    logger.warning(f"Failed to send post {post_id}")
 
         await asyncio.sleep(60 + random.uniform(1, 5))
 
