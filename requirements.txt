@@ -1,5 +1,0 @@
-requests
-python-telegram-bot
-Pillow
-aiohttp
-asyncpg
