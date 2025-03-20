@@ -6,6 +6,7 @@ import random
 import re
 import logging
 from io import BytesIO
+from datetime import datetime
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import RetryAfter, TimedOut, BadRequest
 from html import unescape
@@ -31,14 +32,14 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not SUPABASE_URL or not 
 headers = {
     "apikey": SUPABASE_KEY,
     "Content-Type": "application/json",
-    "Prefer": "resolution=merge-duplicates"  # Игнорировать дубликаты при вставке
+    "Prefer": "resolution=merge-duplicates"
 }
 base_url = f"{SUPABASE_URL}/rest/v1"
 
 # Глобальная блокировка для предотвращения параллельного выполнения
 bot_task_lock = asyncio.Lock()
 
-# Функция для проверки, отправлены ли посты (пакетный запрос с повторными попытками)
+# Функция для проверки, отправлены ли посты (пакетный запрос без фильтрации по времени)
 async def are_posts_sent(post_ids, max_retries=5):
     if not post_ids:
         return set()
@@ -56,23 +57,25 @@ async def are_posts_sent(post_ids, max_retries=5):
             if attempt == max_retries - 1:
                 logger.error("Не удалось проверить посты после всех попыток")
                 return set()
-            await asyncio.sleep(2 ** attempt)  # Экспоненциальная задержка: 1, 2, 4, 8, 16 секунд
+            await asyncio.sleep(2 ** attempt)
     return set()
 
-# Функция для добавления отправленных постов в базу данных (пакетная вставка)
+# Функция для добавления отправленных постов в базу данных (пакетная вставка с created_at)
 async def add_sent_posts(post_ids):
     if not post_ids:
         return True
     url = f"{base_url}/sent_posts"
-    data = [{"post_id": post_id} for post_id in post_ids]
+    # Добавляем created_at для каждой записи
+    current_time = datetime.utcnow().isoformat()
+    data = [{"post_id": post_id, "created_at": current_time} for post_id in post_ids]
     try:
         response = requests.post(url, headers=headers, json=data, timeout=10)
         if response.status_code == 201:
-            logger.info(f"Posts {post_ids} successfully added to database")
+            logger.info(f"Posts {post_ids} successfully added to database at {current_time}")
             return True
         elif response.status_code == 409:
             logger.warning(f"Duplicate posts detected in {post_ids}, but ignored due to merge-duplicates")
-            return True  # Дубликаты игнорируются благодаря Prefer: resolution=merge-duplicates
+            return True
         else:
             logger.error(f"Ошибка добавления постов {post_ids}: {response.status_code} {response.text}")
             return False
