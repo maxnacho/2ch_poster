@@ -22,7 +22,7 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not SUPABASE_URL:
     raise ValueError("Отсутствуют необходимые переменные окружения!")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-CHECK_INTERVAL = 60  # Интервал проверки в секундах
+CHECK_INTERVAL = 15  # Интервал проверки в секундах
 MAX_CAPTION_LENGTH = 1024
 MAX_MESSAGE_LENGTH = 4096
 
