@@ -11,6 +11,7 @@ from telegram.error import RetryAfter, TimedOut, BadRequest
 from html import unescape
 from PIL import Image
 from aiohttp import web
+import time
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -30,46 +31,48 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not SUPABASE_URL or not 
 headers = {
     "apikey": SUPABASE_KEY,
     "Content-Type": "application/json",
+    "Prefer": "resolution=merge-duplicates"  # Игнорировать дубликаты при вставке
 }
 base_url = f"{SUPABASE_URL}/rest/v1"
 
-# Функция для проверки, отправлены ли посты (пакетный запрос)
-def are_posts_sent(post_ids):
+# Глобальная блокировка для предотвращения параллельного выполнения
+bot_task_lock = asyncio.Lock()
+
+# Функция для проверки, отправлены ли посты (пакетный запрос с повторными попытками)
+async def are_posts_sent(post_ids, max_retries=5):
     if not post_ids:
         return set()
-    # Используем фильтр in для пакетного запроса
     post_ids_str = ",".join(map(str, post_ids))
     url = f"{base_url}/sent_posts?select=post_id&post_id=in.({post_ids_str})"
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        # Возвращаем множество ID постов, которые уже отправлены
-        return {item["post_id"] for item in data}
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка проверки постов: {e}")
-        return set()
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"are_posts_sent: Found {len(data)} existing posts for {len(post_ids)} IDs")
+            return {item["post_id"] for item in data}
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Ошибка проверки постов (попытка {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                logger.error("Не удалось проверить посты после всех попыток")
+                return set()
+            await asyncio.sleep(2 ** attempt)  # Экспоненциальная задержка: 1, 2, 4, 8, 16 секунд
+    return set()
 
 # Функция для добавления отправленных постов в базу данных (пакетная вставка)
-def add_sent_posts(post_ids):
+async def add_sent_posts(post_ids):
     if not post_ids:
         return True
     url = f"{base_url}/sent_posts"
-    # Формируем список записей для вставки
     data = [{"post_id": post_id} for post_id in post_ids]
     try:
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(url, headers=headers, json=data, timeout=10)
         if response.status_code == 201:
             logger.info(f"Posts {post_ids} successfully added to database")
             return True
-        elif response.status_code == 400:
-            error_data = response.json()
-            if "message" in error_data and "unique constraint" in error_data["message"].lower():
-                logger.info(f"Some posts in {post_ids} already exist in database")
-                return False
-            else:
-                logger.error(f"Ошибка добавления постов {post_ids}: {response.text}")
-                return False
+        elif response.status_code == 409:
+            logger.warning(f"Duplicate posts detected in {post_ids}, but ignored due to merge-duplicates")
+            return True  # Дубликаты игнорируются благодаря Prefer: resolution=merge-duplicates
         else:
             logger.error(f"Ошибка добавления постов {post_ids}: {response.status_code} {response.text}")
             return False
@@ -157,20 +160,20 @@ async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
                     if i == 0 and messages:
                         chunk[0] = InputMediaPhoto(media=chunk[0].media, caption=messages[0], parse_mode="HTML")
                     await bot.send_media_group(chat_id=chat_id, media=chunk)
-                    await asyncio.sleep(3)  # Задержка между отправками медиа
+                    await asyncio.sleep(3)
 
             for i, message in enumerate(messages):
                 if i == 0 and media_group:
                     continue
                 await bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
-                await asyncio.sleep(3)  # Задержка между отправками сообщений
+                await asyncio.sleep(3)
 
             logger.info(f"Post {post_id} sent successfully")
             return True
 
         except RetryAfter as e:
             logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
-            await asyncio.sleep(e.retry_after + 5)  # Ждём указанное время + 5 секунд
+            await asyncio.sleep(e.retry_after + 5)
             if attempt == max_retries - 1:
                 logger.warning(f"Failed to send post {post_id} after {max_retries} attempts")
                 return False
@@ -178,7 +181,7 @@ async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
 
         except TimedOut as e:
             logger.error(f"Ошибка Telegram при отправке поста {post_id}: {e}")
-            await asyncio.sleep(10)  # Задержка при таймауте
+            await asyncio.sleep(10)
             if attempt == max_retries - 1:
                 logger.warning(f"Failed to send post {post_id} after {max_retries} attempts")
                 return False
@@ -196,33 +199,45 @@ async def bot_task():
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
     while True:
-        logger.info("Checking for new posts")
-        all_posts = get_all_posts()
-        logger.info(f"Found {len(all_posts)} posts")
+        async with bot_task_lock:
+            logger.info("Checking for new posts")
+            all_posts = get_all_posts()
+            logger.info(f"Found {len(all_posts)} posts")
 
-        # Извлекаем все ID постов
-        post_ids = [str(post["num"]) for post in all_posts]
+            # Извлекаем все ID постов
+            post_ids = [str(post["num"]) for post in all_posts]
 
-        # Пакетно проверяем, какие посты уже отправлены
-        sent_post_ids = are_posts_sent(post_ids)
+            # Пакетно проверяем, какие посты уже отправлены
+            sent_post_ids = await are_posts_sent(post_ids)
 
-        # Собираем новые посты для отправки
-        new_posts = [post for post in all_posts if str(post["num"]) not in sent_post_ids]
-        new_post_ids = [str(post["num"]) for post in new_posts]
+            # Собираем новые посты для отправки
+            new_posts = [post for post in all_posts if str(post["num"]) not in sent_post_ids]
+            new_post_ids = [str(post["num"]) for post in new_posts]
 
-        if not new_posts:
-            logger.info("No new posts to send")
-        else:
-            # Пакетно добавляем новые посты в базу
-            if add_sent_posts(new_post_ids):
-                for post in new_posts:
-                    post_id = str(post["num"])
-                    logger.info(f"Sending post {post_id} to Telegram")
-                    success = await send_post_to_telegram(bot, TELEGRAM_CHANNEL_ID, post)
-                    if not success:
-                        logger.warning(f"Failed to send post {post_id} to Telegram")
+            if not new_posts:
+                logger.info("No new posts to send")
             else:
-                logger.warning(f"Failed to add new posts to database, skipping Telegram send")
+                logger.info(f"Found {len(new_posts)} new posts: {new_post_ids}")
+                # Дополнительная проверка перед вставкой
+                final_check = await are_posts_sent(new_post_ids)
+                new_posts = [post for post in new_posts if str(post["num"]) not in final_check]
+                new_post_ids = [str(post["num"]) for post in new_posts]
+                logger.info(f"After final check, {len(new_posts)} posts remain: {new_post_ids}")
+
+                if new_posts:
+                    # Пакетно добавляем новые посты в базу
+                    success = await add_sent_posts(new_post_ids)
+                    if success:
+                        for post in new_posts:
+                            post_id = str(post["num"])
+                            logger.info(f"Sending post {post_id} to Telegram")
+                            success = await send_post_to_telegram(bot, TELEGRAM_CHANNEL_ID, post)
+                            if not success:
+                                logger.warning(f"Failed to send post {post_id} to Telegram")
+                    else:
+                        logger.warning(f"Failed to add new posts to database, skipping Telegram send")
+                else:
+                    logger.info("No new posts after final check")
 
         await asyncio.sleep(300)  # Интервал 5 минут
 
@@ -233,22 +248,17 @@ async def health(request):
 
 # Основная функция
 async def main():
-    # Запуск HTTP-сервера
     app = web.Application()
     app.add_routes([web.get('/health', health)])
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv('PORT', 10000))  # Порт 10000, как указано в Render
+    port = int(os.getenv('PORT', 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    # Запуск задачи бота
     bot_task_instance = asyncio.create_task(bot_task())
+    await asyncio.Future()
 
-    # Поддержание работы event loop
-    await asyncio.Future()  # Бесконечное ожидание
-
-    # Очистка (не будет достигнута, но хорошо иметь)
     await runner.cleanup()
     bot_task_instance.cancel()
 
