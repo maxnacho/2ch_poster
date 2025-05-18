@@ -136,7 +136,7 @@ async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
     for file in files:
         file_url = f"https://2ch.hk{file['path']}"
         if file["path"].endswith((".webm", ".mp4")):
-            file_links.append(f"🎥 Видео: {file_url}")
+            file_links.append(f"{file_url}")
 
     if file_links:
         text += "\n\n" + "\n".join(file_links)
