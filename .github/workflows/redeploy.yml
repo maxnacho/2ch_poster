@@ -2,15 +2,27 @@ name: Daily Redeploy to Render
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Daily at 00:00 UTC
+    - cron: '0 0 * * *'
 
 jobs:
   redeploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Render Deploy
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update activity file
         run: |
-          curl -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys
+          echo "Last updated: $(date)" >> ACTIVITY.md
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add ACTIVITY.md
+          git commit -m "Update activity file [skip ci]"
+          git push
+
+      - name: Deploy to Render
+        uses: JorgeLNJunior/render-deploy@v1.4.5
+        with:
+          service_id: ${{ secrets.RENDER_SERVICE_ID }}
+          api_key: ${{ secrets.RENDER_API_TOKEN }}
+          wait_deploy: true
