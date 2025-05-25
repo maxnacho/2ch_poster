@@ -11,15 +11,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Update activity file
-        run: |
-          echo "Last updated: $(date)" >> ACTIVITY.md
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
-          git add ACTIVITY.md
-          git commit -m "Update activity file [skip ci]"
-          git push
-
       - name: Deploy to Render
         uses: JorgeLNJunior/render-deploy@v1.4.5
         with:
