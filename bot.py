@@ -1,8 +1,6 @@
 import os
 import requests
 import asyncio
-import json
-import random
 import re
 import logging
 from io import BytesIO
@@ -12,7 +10,6 @@ from telegram.error import RetryAfter, TimedOut, BadRequest
 from html import unescape
 from PIL import Image
 from aiohttp import web
-import time
 
 # =========================
 # Логирование
@@ -40,7 +37,7 @@ missing = [k for k, v in required_env.items() if not v]
 if missing:
     raise ValueError(f"Отсутствуют необходимые переменные окружения: {', '.join(missing)}")
 
-logger.info(f"THREAD_URL set to: {THREAD_URL}")
+logger.info(f"THREAD_URL raw: {THREAD_URL}")
 
 # =========================
 # HTTP-сессия (общая)
@@ -49,6 +46,7 @@ SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (compatible; 2ch_poster/1.0; +render.com)",
     "Accept": "application/json, */*;q=0.1",
+    "X-Requested-With": "XMLHttpRequest",
 })
 
 # =========================
@@ -69,6 +67,33 @@ bot_task_lock = asyncio.Lock()
 # =========================
 # Вспомогательные функции
 # =========================
+def clean_html(text):
+    text = unescape(text)
+    text = re.sub(r"<a .*?>(.*?)</a>", r"\1", text)
+    text = re.sub(r"<br\s*/?>", "\n", text)
+    text = re.sub(r"<.*?>", "", text)
+    return text.strip()
+
+def split_text(text, max_length=4096):
+    return [text[i:i + max_length] for i in range(0, len(text), max_length)]
+
+def validate_and_resize_image(image_data):
+    try:
+        img = Image.open(BytesIO(image_data))
+        if img.mode in ("P", "RGBA", "LA"):
+            img = img.convert("RGB")
+        width, height = img.size
+        if width < 320 or height < 320 or width > 10000 or height > 10000:
+            img = img.resize((1280, 720))
+        output = BytesIO()
+        img.save(output, format="JPEG")
+        output.seek(0)
+        return output
+    except Exception as e:
+        logger.error(f"Ошибка обработки изображения: {e}")
+        return None
+
+# ------- Supabase helpers
 async def are_posts_sent(post_ids, max_retries=5):
     if not post_ids:
         return set()
@@ -110,66 +135,98 @@ async def add_sent_posts(post_ids):
         logger.error(f"Ошибка запроса при добавлении постов {post_ids}: {e}")
         return False
 
-def clean_html(text):
-    text = unescape(text)
-    text = re.sub(r"<a .*?>(.*?)</a>", r"\1", text)
-    text = re.sub(r"<br\s*/?>", "\n", text)
-    text = re.sub(r"<.*?>", "", text)
-    return text.strip()
+# =========================
+# Парсинг THREAD_URL и API endpoints
+# =========================
+THREAD_RE = re.compile(
+    r"""(?xi)
+    ^(?:https?://)?      # optional scheme
+    (?:(?:2ch\.hk|2ch\.life|2ch\.pm|2-ch\.ru))/   # host
+    (?P<board>[a-z0-9_]+)/                       # board
+    (?:res/)?                                     # optional 'res/'
+    (?P<thread>\d+)                               # thread id
+    (?:\.(?:html|json))?                          # optional extension
+    (?:\?.*)?$                                    # optional query
+    """
+)
 
-def split_text(text, max_length=4096):
-    return [text[i:i + max_length] for i in range(0, len(text), max_length)]
+def parse_thread(thread_url: str):
+    m = THREAD_RE.search(thread_url.strip())
+    if not m:
+        raise ValueError("THREAD_URL не распознан. Пример: https://2ch.hk/b/res/123456.html")
+    board = m.group("board")
+    thread = m.group("thread")
+    return board, thread
 
-def validate_and_resize_image(image_data):
-    try:
-        img = Image.open(BytesIO(image_data))
-        if img.mode in ("P", "RGBA", "LA"):
-            img = img.convert("RGB")
-        width, height = img.size
-        if width < 320 or height < 320 or width > 10000 or height > 10000:
-            img = img.resize((1280, 720))
-        output = BytesIO()
-        img.save(output, format="JPEG")
-        output.seek(0)
-        return output
-    except Exception as e:
-        logger.error(f"Ошибка обработки изображения: {e}")
-        return None
+BOARD, THREAD_ID = parse_thread(THREAD_URL)
+logger.info(f"Parsed THREAD: board={BOARD}, thread={THREAD_ID}")
+
+API_ENDPOINTS = [
+    f"https://2ch.hk/makaba/mobile.fcgi?task=get_thread&board={BOARD}&thread={THREAD_ID}&post=0",
+    f"https://2ch.life/makaba/mobile.fcgi?task=get_thread&board={BOARD}&thread={THREAD_ID}&post=0",
+]
 
 # =========================
-# Получение постов
+# Получение постов (Makaba API + фолбэк)
 # =========================
 def get_all_posts():
-    try:
-        resp = SESSION.get(THREAD_URL, timeout=20)
-        if resp.status_code != 200:
-            logger.error(f"THREAD_URL HTTP {resp.status_code}; first 200 bytes: {resp.text[:200]!r}")
-            return []
-        ctype = resp.headers.get("Content-Type", "")
-        if "application/json" not in ctype:
-            logger.error(f"Ожидался JSON, но пришёл '{ctype}'; first 200 bytes: {resp.text[:200]!r}")
-            return []
+    last_err = None
+    for api_url in API_ENDPOINTS:
         try:
-            data = resp.json()
-        except ValueError as e:
-            logger.error(f"JSONDecodeError: {e}; first 200 bytes: {resp.text[:200]!r}")
-            return []
-        threads = data.get("threads") or []
-        if not threads:
-            logger.warning("JSON корректный, но нет ключа 'threads' или он пуст")
-            return []
-        posts = threads[0].get("posts", [])
-        return posts
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка сети при запросе THREAD_URL: {e}")
-        return []
+            resp = SESSION.get(api_url, timeout=25)
+            if resp.status_code != 200:
+                logger.error(f"[{api_url}] HTTP {resp.status_code}; first 200 bytes: {resp.text[:200]!r}")
+                last_err = f"HTTP {resp.status_code}"
+                continue
+
+            ctype = resp.headers.get("Content-Type", "")
+            if "application/json" not in ctype and "text/json" not in ctype:
+                # Makaba иногда отдает text/plain с JSON — пробуем json() всё равно
+                if "html" in ctype:
+                    logger.error(f"[{api_url}] Ожидался JSON, пришёл HTML; first 200 bytes: {resp.text[:200]!r}")
+                    last_err = "HTML instead of JSON"
+                    continue
+
+            try:
+                data = resp.json()
+            except ValueError as e:
+                logger.error(f"[{api_url}] JSONDecodeError: {e}; first 200 bytes: {resp.text[:200]!r}")
+                last_err = "bad JSON"
+                continue
+
+            # Структура Makaba: список постов или словарь {"Error": "..."}
+            if isinstance(data, dict) and data.get("Error"):
+                logger.error(f"[{api_url}] Makaba Error: {data.get('Error')}")
+                last_err = f"Makaba error: {data.get('Error')}"
+                continue
+
+            if isinstance(data, list):
+                # список постов
+                return data
+            elif isinstance(data, dict) and "threads" in data:
+                # На всякий: поддержка схемы threads[0].posts
+                threads = data.get("threads") or []
+                if threads:
+                    return threads[0].get("posts", [])
+                return []
+
+            logger.error(f"[{api_url}] Неожиданная структура ответа: type={type(data)}")
+            last_err = "unexpected structure"
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[{api_url}] Ошибка сети: {e}")
+            last_err = str(e)
+
+    # Если все варианты не удались
+    logger.error(f"Не удалось получить JSON от всех эндпоинтов. Последняя ошибка: {last_err}")
+    return []
 
 # =========================
 # Отправка в Telegram
 # =========================
 async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
+    # Makaba возвращает поля "num", "comment", "files" (могут быть [])
     post_id = str(post.get("num"))
-    text = clean_html(post.get("comment", ""))
+    text = clean_html(post.get("comment", "") or "")
     files = post.get("files", []) or []
     media_group = []
 
@@ -178,8 +235,11 @@ async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
 
     file_links = []
     for file in files:
-        file_url = f"https://2ch.hk{file['path']}"
-        if file["path"].endswith((".webm", ".mp4")):
+        path = file.get("path") or file.get("fullname") or ""
+        if not path:
+            continue
+        file_url = f"https://2ch.hk{path}"
+        if path.endswith((".webm", ".mp4")):
             file_links.append(file_url)
 
     if file_links:
@@ -189,9 +249,12 @@ async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
 
     for attempt in range(max_retries):
         try:
-            # Скачивание медиа с проверками
+            # Скачивание медиа
             for file in files:
-                file_url = f"https://2ch.hk{file['path']}"
+                path = file.get("path") or file.get("fullname") or ""
+                if not path:
+                    continue
+                file_url = f"https://2ch.hk{path}"
                 try:
                     response = SESSION.get(file_url, timeout=30)
                     if response.status_code != 200:
@@ -201,20 +264,19 @@ async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
                     logger.warning(f"Ошибка скачивания {file_url}: {e}")
                     continue
 
-                if file["path"].endswith((".jpg", ".jpeg", ".png", ".gif")):
+                if path.endswith((".jpg", ".jpeg", ".png", ".gif")):
                     image_data = validate_and_resize_image(response.content)
                     if image_data:
                         media_group.append(InputMediaPhoto(media=image_data))
-                elif file["path"].endswith((".webm", ".mp4")):
+                elif path.endswith((".webm", ".mp4")):
                     video_data = BytesIO(response.content)
                     media_group.append(InputMediaVideo(media=video_data))
 
-            # Отправка медиа-группами по 10
+            # Медиа-группы по 10
             if media_group:
                 for i in range(0, len(media_group), 10):
                     chunk = media_group[i:i+10]
                     if i == 0 and messages:
-                        # безопасно проставляем подпись первому элементу
                         try:
                             chunk[0].caption = messages[0]
                             chunk[0].parse_mode = "HTML"
@@ -223,7 +285,7 @@ async def send_post_to_telegram(bot, chat_id, post, max_retries=3):
                     await bot.send_media_group(chat_id=chat_id, media=chunk)
                     await asyncio.sleep(3)
 
-            # Остальные текстовые сообщения
+            # Остальные текстовые
             for i, message in enumerate(messages):
                 if i == 0 and media_group:
                     continue
@@ -268,19 +330,19 @@ async def bot_task():
             all_posts = get_all_posts()
             logger.info(f"Found {len(all_posts)} posts")
 
-            post_ids = [str(post.get("num")) for post in all_posts if post.get("num")]
+            post_ids = [str(p.get("num")) for p in all_posts if p.get("num")]
             sent_post_ids = await are_posts_sent(post_ids)
 
-            new_posts = [post for post in all_posts if str(post.get("num")) not in sent_post_ids]
-            new_post_ids = [str(post.get("num")) for post in new_posts]
+            new_posts = [p for p in all_posts if str(p.get("num")) not in sent_post_ids]
+            new_post_ids = [str(p.get("num")) for p in new_posts]
 
             if not new_posts:
                 logger.info("No new posts to send")
             else:
                 logger.info(f"Found {len(new_posts)} new posts: {new_post_ids}")
                 final_check = await are_posts_sent(new_post_ids)
-                new_posts = [post for post in new_posts if str(post.get("num")) not in final_check]
-                new_post_ids = [str(post.get("num")) for post in new_posts]
+                new_posts = [p for p in new_posts if str(p.get("num")) not in final_check]
+                new_post_ids = [str(p.get("num")) for p in new_posts]
                 logger.info(f"After final check, {len(new_posts)} posts remain: {new_post_ids}")
 
                 if new_posts:
